@@ -1,25 +1,37 @@
-import React from 'react';
-import logo from './logo.svg';
-import './App.css';
+import React, { useRef, useEffect } from "react";
+import styled from "styled-components";
+
+const StyledContainer = styled.div`
+  text-align: center;
+`;
+
+const StyledCanvas = styled.canvas`
+  border-radius: 0.5em;
+  border: 2px solid #ccc;
+`;
+
+const AppCanvas = () => {
+  const ref = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = ref.current;
+    const ctx = canvas?.getContext("2d");
+    if (ctx) {
+      ctx.fillStyle = "#ddd";
+      ctx.fillRect(20, 20, 300, 300);
+    }
+  }, [ref]);
+
+  return <StyledCanvas width={800} height={600} ref={ref} />;
+};
 
 function App() {
   return (
-    <div className="App">
-      <header className="App-header">
-        <img src={logo} className="App-logo" alt="logo" />
-        <p>
-          Edit <code>src/App.tsx</code> and save to reload.
-        </p>
-        <a
-          className="App-link"
-          href="https://reactjs.org"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          Learn React
-        </a>
-      </header>
-    </div>
+    <StyledContainer>
+      <h1>Stick Walk</h1>
+      <p>Teach a stickman to walk using evolutionary programming programming</p>
+      <AppCanvas />
+    </StyledContainer>
   );
 }
 
