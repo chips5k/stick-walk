@@ -11,7 +11,13 @@ const StyledCanvas = styled.canvas`
   margin-top: 0.5em;
 `;
 
-const peek = (array: any[], index: number) => array[array.length + index];
+const peek = function <T>(array: T[], index: number) {
+  return array[array.length + index];
+};
+
+const round = (number: number, decimals: number) => {
+  return Math.round(number * Math.pow(10, decimals)) * Math.pow(10, -decimals);
+};
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const UPDATES_PER_SECOND = 60;
 
@@ -36,29 +42,77 @@ const createInputHandler = (inputRefs: InputRefs) => {
 const createPhysicsAdvancer =
   () => async (timeStepMs: number, physicsState: PhysicsState) => ({
     ...physicsState,
-    physicsTimeMs: performance.now(),
+    startMs: performance.now(),
   });
 
-const createContext2DRenderer =
-  (ctx: CanvasRenderingContext2D) => async (tickStates: TickState[]) => {
+const createContext2DRenderer = (ctx: CanvasRenderingContext2D) => {
+  const timing = {
+    frames: 0,
+    prevMs: performance.now(),
+    currMs: performance.now(),
+    fps: "0",
+    period: 10,
+  };
+
+  return async (tickStates: TickState[]) => {
+    timing.frames++;
+    if (timing.frames === timing.period) {
+      timing.prevMs = timing.currMs;
+      timing.currMs = performance.now();
+      timing.frames = 0;
+
+      const delta = round(timing.currMs - timing.prevMs, 2);
+      const ratio = 1000 / delta;
+      timing.fps = Math.round(ratio * timing.period).toFixed(0);
+    }
     await sleep(peek(tickStates, -1).delayMs ?? 0);
-    // Render
-    ctx.clearRect(0, 0, 800, 600);
-    ctx.fillStyle = "#ddd";
-    ctx.fillRect(20, 20, 300, 300);
+
     const currentTick = peek(tickStates, -1);
     const previousTick = peek(tickStates, -2) || currentTick;
-    const elapsedSincePreviousFrameMs =
-      currentTick.startMs - previousTick.startMs;
-    const fps = Math.round(1000 / elapsedSincePreviousFrameMs);
+
+    const physicsState = peek(currentTick.physicsStates, -1);
+    ctx.clearRect(0, 0, 800, 600);
+    ctx.fillStyle = "#ddd";
+
+    ctx.fillRect(20, 20, 300, 300);
+
+    physicsState.rigidBodies.forEach((rb) => {
+      ctx.strokeStyle = "#000";
+      rb.edges.forEach((e) => {
+        ctx.beginPath();
+        ctx.moveTo(e.start.x, e.start.y);
+        ctx.lineTo(e.end.x, e.end.y);
+        ctx.stroke();
+      });
+    });
+
     ctx.fillStyle = "#459617";
-    ctx.fillText(`FPS: ${fps}`, 10, 10);
+    ctx.fillText(`FPS: ${timing.fps}`, 10, 10);
     ctx.fillText(`UPS: ${currentTick.physicsStates.length}`, 60, 10);
     ctx.fillText(`Delay(ms): ${currentTick.delayMs}`, 180, 10);
     ctx.fillText(`Paused: ${currentTick.paused}`, 280, 10);
   };
+};
 
-interface PhysicsState {}
+interface Vector {
+  x: number;
+  y: number;
+}
+
+interface Edge {
+  start: Vector;
+  end: Vector;
+}
+
+interface RigidBody {
+  edges: Edge[];
+  position: Vector;
+  velocity: Vector;
+}
+interface PhysicsState {
+  startMs: number;
+  rigidBodies: RigidBody[];
+}
 
 const tick = async (
   tickStates: TickState[],
@@ -69,12 +123,13 @@ const tick = async (
   render: (tickStates: TickState[]) => Promise<void>
 ) => {
   const lastTick = peek(tickStates, -1);
-  if (lastTick.paused) {
-    const currentTickStartMs = performance.now();
-    const elapsedSincePreviousTickMs = currentTickStartMs - lastTick.startMs;
+  const currentTickStartMs = performance.now();
+  if (!lastTick.paused) {
+    const lastPhysicsState = peek(lastTick.physicsStates, -1);
+    const elapsedSincePreviousTickMs =
+      currentTickStartMs - lastPhysicsState.startMs;
     let accumulatedMs = elapsedSincePreviousTickMs + lastTick.accumulatedMs;
     const physicsTimeStepMs = 1000 / UPDATES_PER_SECOND;
-    const lastPhysicsState = peek(lastTick.physicsState, -1);
     const newPhysicsStates: PhysicsState[] = [];
     while (accumulatedMs / physicsTimeStepMs >= 1) {
       newPhysicsStates.push(
@@ -84,6 +139,11 @@ const tick = async (
         )
       );
       accumulatedMs -= physicsTimeStepMs;
+    }
+
+    //If not enough time has accumulated to generate a new physics state this can occur
+    if (newPhysicsStates.length === 0) {
+      newPhysicsStates.push(lastPhysicsState);
     }
 
     const newTickStates = [
@@ -102,6 +162,35 @@ const tick = async (
   return tickStates;
 };
 
+const createRectangleRigidBody = (
+  x: number,
+  y: number,
+  width: number,
+  height: number
+): RigidBody => {
+  return {
+    edges: [
+      {
+        start: { x, y },
+        end: { x: x, y: y + height },
+      },
+      {
+        start: { x: x, y: y + height },
+        end: { x: x + width, y: y + height },
+      },
+      {
+        start: { x: x + width, y: y + height },
+        end: { x: x + width, y: y },
+      },
+      {
+        start: { x: x + width, y: y },
+        end: { x, y },
+      },
+    ],
+    position: { x, y },
+    velocity: { x: 0.5, y: 0.5 },
+  };
+};
 const tickViaRequestAnimationFrame = async (
   initialTickState: TickState,
   tickFn: (tickStates: TickState[]) => Promise<TickState[]>
@@ -117,7 +206,7 @@ const tickViaRequestAnimationFrame = async (
 interface TickState {
   accumulatedMs: number;
   startMs: number;
-  physicsState: PhysicsState;
+  physicsStates: PhysicsState[];
   delayMs: number;
   paused: boolean;
 }
@@ -140,9 +229,14 @@ const AppCanvas = memo(
           const initialTickState: TickState = {
             accumulatedMs: 0,
             startMs: performance.now(),
-            physicsState: {} as PhysicsState,
+            physicsStates: [
+              {
+                startMs: 0,
+                rigidBodies: [createRectangleRigidBody(0, 0, 100, 100)],
+              } as PhysicsState,
+            ],
             delayMs: 0,
-            paused: true,
+            paused: false,
           };
 
           const inputRefs = {
@@ -151,12 +245,11 @@ const AppCanvas = memo(
           };
 
           const handleInput = createInputHandler(inputRefs);
+          const advancePhysics = createPhysicsAdvancer();
+          const render = createContext2DRenderer(ctx);
+
           const ticker = async (tickStates: TickState[]) =>
-            tick(
-              await handleInput(tickStates),
-              createPhysicsAdvancer(),
-              createContext2DRenderer(ctx)
-            );
+            tick(await handleInput(tickStates), advancePhysics, render);
 
           await tickViaRequestAnimationFrame(initialTickState, ticker);
         }
@@ -170,8 +263,8 @@ const AppCanvas = memo(
 function App() {
   const delayMsRef = useRef(0);
   // Todo update ref automatically
-  const [paused, setPaused] = useState(true);
-  const pausedRef = useRef(true);
+  const [paused, setPaused] = useState(false);
+  const pausedRef = useRef(false);
 
   return (
     <StyledContainer>
@@ -195,7 +288,7 @@ function App() {
             });
           }}
         >
-          {paused ? "Pause" : "Resume"}
+          {paused ? "Resume" : "Pause"}
         </button>
       </div>
       <AppCanvas pausedRef={pausedRef} delayMsRef={delayMsRef} />
