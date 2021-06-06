@@ -8,103 +8,127 @@ const StyledContainer = styled.div`
 const StyledCanvas = styled.canvas`
   border-radius: 0.5em;
   border: 2px solid #ccc;
+  margin-top: 0.5em;
 `;
 
+const peek = (array: any[], index: number) => array[array.length + index];
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const UPDATES_PER_SECOND = 60;
 
+interface InputRefs {
+  paused: RefObject<boolean>;
+  delayMs: RefObject<number>;
+}
+
+const createInputHandler = (inputRefs: InputRefs) => {
+  return (tickStates: TickState[]) => {
+    return [
+      ...tickStates.slice(0, -1),
+      {
+        ...tickStates.slice(-1)[0],
+        paused: inputRefs.paused.current,
+        delayMs: inputRefs.delayMs.current,
+      },
+    ] as TickState[];
+  };
+};
+
 const createPhysicsAdvancer =
-  () => async (timeStepMs: number, physicsState: PhysicsState) =>
-    physicsState;
+  () => async (timeStepMs: number, physicsState: PhysicsState) => ({
+    ...physicsState,
+    physicsTimeMs: performance.now(),
+  });
 
 const createContext2DRenderer =
-  (ctx: CanvasRenderingContext2D) => async (tickData: TickData) => {
-    await sleep(tickData.refs.delay.current ?? 0);
+  (ctx: CanvasRenderingContext2D) => async (tickStates: TickState[]) => {
+    await sleep(peek(tickStates, -1).delayMs ?? 0);
     // Render
     ctx.clearRect(0, 0, 800, 600);
     ctx.fillStyle = "#ddd";
     ctx.fillRect(20, 20, 300, 300);
+    const currentTick = peek(tickStates, -1);
+    const previousTick = peek(tickStates, -2) || currentTick;
     const elapsedSincePreviousFrameMs =
-      performance.now() - tickData.previousTickStartMs;
+      currentTick.startMs - previousTick.startMs;
     const fps = Math.round(1000 / elapsedSincePreviousFrameMs);
     ctx.fillStyle = "#459617";
     ctx.fillText(`FPS: ${fps}`, 10, 10);
-    ctx.fillText(`UPS: ${tickData.previousTickPhysicsUpdates}`, 60, 10);
+    ctx.fillText(`UPS: ${currentTick.physicsStates.length}`, 60, 10);
+    ctx.fillText(`Delay(ms): ${currentTick.delayMs}`, 180, 10);
+    ctx.fillText(`Paused: ${currentTick.paused}`, 280, 10);
   };
 
 interface PhysicsState {}
 
 const tick = async (
-  tickData: TickData,
+  tickStates: TickState[],
   advancePhysicsState: (
     timeStepMs: number,
     physicsState: PhysicsState
   ) => Promise<PhysicsState>,
-  render: (tickData: TickData) => void
+  render: (tickStates: TickState[]) => Promise<void>
 ) => {
-  await render(tickData);
-  const currentTickStartMs = performance.now();
-  const elapsedSincePreviousTickMs =
-    currentTickStartMs - tickData.previousTickStartMs;
-  let accumulatedMs = elapsedSincePreviousTickMs + tickData.accumulatedMs;
-  const physicsTimeStepMs = 1000 / UPDATES_PER_SECOND;
-  let updates = 0;
-  let currentPhysicsState = tickData.previousPhysicsState;
+  const lastTick = peek(tickStates, -1);
+  if (lastTick.paused) {
+    const currentTickStartMs = performance.now();
+    const elapsedSincePreviousTickMs = currentTickStartMs - lastTick.startMs;
+    let accumulatedMs = elapsedSincePreviousTickMs + lastTick.accumulatedMs;
+    const physicsTimeStepMs = 1000 / UPDATES_PER_SECOND;
+    const lastPhysicsState = peek(lastTick.physicsState, -1);
+    const newPhysicsStates: PhysicsState[] = [];
+    while (accumulatedMs / physicsTimeStepMs >= 1) {
+      newPhysicsStates.push(
+        await advancePhysicsState(
+          physicsTimeStepMs,
+          peek(newPhysicsStates, -1) || lastPhysicsState
+        )
+      );
+      accumulatedMs -= physicsTimeStepMs;
+    }
 
-  while (accumulatedMs / physicsTimeStepMs >= 1) {
-    currentPhysicsState = await advancePhysicsState(
-      physicsTimeStepMs,
-      currentPhysicsState
-    );
-    accumulatedMs -= physicsTimeStepMs;
-    updates++;
+    const newTickStates = [
+      ...tickStates,
+      {
+        ...lastTick,
+        accumulatedMs,
+        startMs: currentTickStartMs,
+        physicsStates: newPhysicsStates,
+      },
+    ];
+    await render(newTickStates);
+    return newTickStates;
   }
-
-  const newTickData = {
-    ...tickData,
-    accumulatedMs,
-    previousTickStartMs: currentTickStartMs,
-    previousTickPhysicsUpdates: updates,
-    previousPhysicsState: currentPhysicsState,
-  };
-  return newTickData;
+  await render(tickStates);
+  return tickStates;
 };
 
 const tickViaRequestAnimationFrame = async (
-  initialTickData: TickData,
-  tickFn: (tickData: TickData) => Promise<TickData>
+  initialTickState: TickState,
+  tickFn: (tickStates: TickState[]) => Promise<TickState[]>
 ) => {
-  const iterate = async (tickData: TickData) => {
-    if (tickData.refs.running.current) {
-      const newTickData = await tickFn(tickData);
-      if (tickData.refs.running.current) {
-        window.requestAnimationFrame(() => {
-          iterate(newTickData);
-        });
-      }
-      return newTickData;
-    }
-    return tickData;
+  const iterate = async (tickStates: TickState[]) => {
+    const newTickStates = (await tickFn(tickStates)).slice(-100);
+    window.requestAnimationFrame(() => iterate(newTickStates));
+    return newTickStates;
   };
 
-  return await iterate(initialTickData);
+  return await iterate([initialTickState]);
 };
-
-interface TickData {
+interface TickState {
   accumulatedMs: number;
-  previousTickStartMs: number;
-  previousPhysicsState: PhysicsState;
-  previousTickPhysicsUpdates: number;
-  refs: { delay: RefObject<number>; running: RefObject<boolean> };
+  startMs: number;
+  physicsState: PhysicsState;
+  delayMs: number;
+  paused: boolean;
 }
 
 const AppCanvas = memo(
   ({
-    runningRef,
-    delayRef,
+    pausedRef,
+    delayMsRef,
   }: {
-    runningRef: RefObject<boolean>;
-    delayRef: RefObject<number>;
+    pausedRef: RefObject<boolean>;
+    delayMsRef: RefObject<number>;
   }) => {
     const ref = useRef<HTMLCanvasElement>(null);
     useEffect(() => {
@@ -113,38 +137,41 @@ const AppCanvas = memo(
         const ctx = canvas?.getContext("2d");
 
         if (ctx) {
-          const initialTickData: TickData = {
+          const initialTickState: TickState = {
             accumulatedMs: 0,
-            previousTickStartMs: performance.now(),
-            previousPhysicsState: {} as PhysicsState,
-            previousTickPhysicsUpdates: 0,
-            refs: {
-              delay: delayRef,
-              running: runningRef,
-            },
+            startMs: performance.now(),
+            physicsState: {} as PhysicsState,
+            delayMs: 0,
+            paused: true,
           };
 
-          const ticker = (tickData: TickData) =>
+          const inputRefs = {
+            paused: pausedRef,
+            delayMs: delayMsRef,
+          };
+
+          const handleInput = createInputHandler(inputRefs);
+          const ticker = async (tickStates: TickState[]) =>
             tick(
-              tickData,
+              await handleInput(tickStates),
               createPhysicsAdvancer(),
               createContext2DRenderer(ctx)
             );
 
-          await tickViaRequestAnimationFrame(initialTickData, ticker);
+          await tickViaRequestAnimationFrame(initialTickState, ticker);
         }
       })();
-    }, [ref, delayRef, runningRef]);
+    }, [ref, delayMsRef, pausedRef]);
 
     return <StyledCanvas width={800} height={600} ref={ref} />;
   }
 );
 
 function App() {
-  const delayRef = useRef(0);
+  const delayMsRef = useRef(0);
   // Todo update ref automatically
-  const [running, setRunning] = useState(true);
-  const runningRef = useRef(true);
+  const [paused, setPaused] = useState(true);
+  const pausedRef = useRef(true);
 
   return (
     <StyledContainer>
@@ -153,25 +180,25 @@ function App() {
         <p>
           Teach a stickman to walk using evolutionary programming programming
         </p>
-        Frame delay:
+        Frame delay(ms):
         <input
           type="text"
           onChange={(e) => {
-            delayRef.current = parseInt(e.target.value) | 0;
+            delayMsRef.current = parseInt(e.target.value) | 0;
           }}
-        />
+        />{" "}
         <button
           onClick={() => {
-            setRunning((prevState) => {
-              runningRef.current = !prevState;
+            setPaused((prevState) => {
+              pausedRef.current = !prevState;
               return !prevState;
             });
           }}
         >
-          {running ? "Stop" : "Start"}
+          {paused ? "Pause" : "Resume"}
         </button>
       </div>
-      <AppCanvas runningRef={runningRef} delayRef={delayRef} />
+      <AppCanvas pausedRef={pausedRef} delayMsRef={delayMsRef} />
     </StyledContainer>
   );
 }
