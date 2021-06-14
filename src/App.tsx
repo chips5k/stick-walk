@@ -40,10 +40,25 @@ const createInputHandler = (inputRefs: InputRefs) => {
 };
 
 const createPhysicsAdvancer =
-  () => async (timeStepMs: number, physicsState: PhysicsState) => ({
-    ...physicsState,
-    startMs: performance.now(),
-  });
+  () => async (timeStepMs: number, physicsState: PhysicsState) => {
+    const fraction = timeStepMs / 1000;
+
+    const f = 9.8 * fraction;
+    const rigidBodies: RigidBody[] = physicsState.rigidBodies.map((rb) => ({
+      ...rb,
+      velocity: { x: rb.velocity.x, y: rb.velocity.y + f },
+      edges: rb.edges.map(({ start, end }) => ({
+        start: { x: start.x, y: start.y + rb.velocity.y },
+        end: { x: end.x, y: end.y + rb.velocity.y },
+      })),
+    }));
+
+    return {
+      ...physicsState,
+      rigidBodies,
+      startMs: performance.now(),
+    };
+  };
 
 const createContext2DRenderer = (ctx: CanvasRenderingContext2D) => {
   const timing = {
@@ -71,10 +86,8 @@ const createContext2DRenderer = (ctx: CanvasRenderingContext2D) => {
     const previousTick = peek(tickStates, -2) || currentTick;
 
     const physicsState = peek(currentTick.physicsStates, -1);
-    ctx.clearRect(0, 0, 800, 600);
+    ctx.clearRect(0, 0, 900, 700);
     ctx.fillStyle = "#ddd";
-
-    ctx.fillRect(20, 20, 300, 300);
 
     physicsState.rigidBodies.forEach((rb) => {
       ctx.strokeStyle = "#000";
@@ -106,7 +119,7 @@ interface Edge {
 
 interface RigidBody {
   edges: Edge[];
-  position: Vector;
+  mass: number;
   velocity: Vector;
 }
 interface PhysicsState {
@@ -122,13 +135,15 @@ const tick = async (
   ) => Promise<PhysicsState>,
   render: (tickStates: TickState[]) => Promise<void>
 ) => {
-  const lastTick = peek(tickStates, -1);
-  const currentTickStartMs = performance.now();
-  if (!lastTick.paused) {
-    const lastPhysicsState = peek(lastTick.physicsStates, -1);
+  const previousTick = peek(tickStates, -2);
+  const currentTick = peek(tickStates, -1);
+  const offset = previousTick && previousTick.paused ? previousTick.startMs : 0;
+  const currentTickStartMs = performance.now() - offset;
+  if (!currentTick.paused) {
+    const lastPhysicsState = peek(currentTick.physicsStates, -1);
     const elapsedSincePreviousTickMs =
-      currentTickStartMs - lastPhysicsState.startMs;
-    let accumulatedMs = elapsedSincePreviousTickMs + lastTick.accumulatedMs;
+      currentTickStartMs - lastPhysicsState.startMs - offset;
+    let accumulatedMs = elapsedSincePreviousTickMs + currentTick.accumulatedMs;
     const physicsTimeStepMs = 1000 / UPDATES_PER_SECOND;
     const newPhysicsStates: PhysicsState[] = [];
     while (accumulatedMs / physicsTimeStepMs >= 1) {
@@ -149,7 +164,7 @@ const tick = async (
     const newTickStates = [
       ...tickStates,
       {
-        ...lastTick,
+        ...currentTick,
         accumulatedMs,
         startMs: currentTickStartMs,
         physicsStates: newPhysicsStates,
@@ -158,8 +173,15 @@ const tick = async (
     await render(newTickStates);
     return newTickStates;
   }
-  await render(tickStates);
-  return tickStates;
+
+  const newTickStates = [
+    ...tickStates,
+    {
+      ...currentTick,
+    },
+  ];
+  await render(newTickStates);
+  return newTickStates;
 };
 
 const createRectangleRigidBody = (
@@ -187,8 +209,8 @@ const createRectangleRigidBody = (
         end: { x, y },
       },
     ],
-    position: { x, y },
-    velocity: { x: 0.5, y: 0.5 },
+    mass: 10,
+    velocity: { x: 0, y: 0 },
   };
 };
 const tickViaRequestAnimationFrame = async (
